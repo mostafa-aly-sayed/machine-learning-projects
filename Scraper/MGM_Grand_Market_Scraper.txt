@@ -1,0 +1,619 @@
+'''
+Scraper V.2
+'''
+
+
+'''
+Product Page: https://ngemgrlhmdqi3zsgscjgjrbwpietxf3kbwjfzrarb4h6f3nimjsiu7yd.top/product/cocaine-hq-tested-with-eztest
+Product Policy Page: https://ngemgrlhmdqi3zsgscjgjrbwpietxf3kbwjfzrarb4h6f3nimjsiu7yd.top/product/cocaine-hq-tested-with-eztest/rules
+Product Reviews Page: https://ngemgrlhmdqi3zsgscjgjrbwpietxf3kbwjfzrarb4h6f3nimjsiu7yd.top/product/cocaine-hq-tested-with-eztest/feedback
+'''
+# Fraud 2651
+# Drugs 6657
+# Digital Goods 2854
+# Guides & Tutorials 2292
+# Miscellaneous 1104
+
+import requests
+from bs4 import BeautifulSoup
+from PIL import Image
+from io import BytesIO
+import base64
+from urllib.parse import urljoin, urlparse
+import csv
+import time
+import random
+import os
+import re
+from collections import deque
+
+# Configuration
+BASE_URL = "https://ngemgrlhmdqi3zsgscjgjrbwpietxf3kbwjfzrarb4h6f3nimjsiu7yd.top"
+LOGIN_URL = f"{BASE_URL}/signin"  # Use the correct signin URL from original script
+PRODUCT_IDENTIFIER = "/product/"
+OUTPUT_FILE = "product_data.csv"
+DELAY_MIN = 2  # Minimum seconds between requests
+DELAY_MAX = 5  # Maximum seconds between requests
+
+# All features we're extracting
+CSV_COLUMNS = [
+    "Product URL",
+    "Product Name",
+    "Product Description",
+    "Outer Category",
+    "Inner Category",
+    "Product Rating",
+    "Vendor Name",
+    "Vendor Level",
+    "Price Per Gram",
+    "Quantity in Stock",
+    "Quantity Sold",
+    "Product Type",
+    "Ships From",
+    "Escrow",
+    "Ships To",
+    "Delivery Type"
+]
+
+def initialize_session():
+    """Initialize session with Tor proxies as in the original script"""
+    session = requests.Session()
+    session.proxies = {
+        'http': 'socks5h://127.0.0.1:9150',
+        'https': 'socks5h://127.0.0.1:9150'
+    }
+    return session
+
+def login(session):
+    """Logs into the website using CAPTCHA process from original script"""
+    print("[*] Fetching login page...")
+    response = session.get(LOGIN_URL)
+    if response.status_code != 200:
+        print(f"[-] Failed to fetch login page. Status: {response.status_code}")
+        return False
+
+    # Parse CSRF token
+    soup = BeautifulSoup(response.text, 'html.parser')
+    token_tag = soup.find("input", {"name": "_token"})
+    if not token_tag:
+        print("[-] CSRF token not found")
+        return False
+    csrf_token = token_tag['value']
+    print(f"[+] CSRF token obtained: {csrf_token[:10]}...")
+
+    # Handle CAPTCHA
+    captcha_img_tag = soup.find("img", class_="img-recaptcha")
+    if not captcha_img_tag:
+        print("[-] CAPTCHA image not found")
+        return False
+
+    # Process CAPTCHA image
+    print("[*] Processing CAPTCHA image...")
+    if captcha_img_tag['src'].startswith("data:image"):
+        base64_data = captcha_img_tag['src'].split(",")[1]
+        captcha_img = Image.open(BytesIO(base64.b64decode(base64_data)))
+    else:
+        captcha_response = session.get(urljoin(LOGIN_URL, captcha_img_tag['src']))
+        captcha_img = Image.open(BytesIO(captcha_response.content))
+
+    captcha_img.show()
+    print("[*] CAPTCHA image opened. Please view and solve.")
+
+    # Get user input
+    username = input("Username: ").strip()
+    password = input("Password: ").strip()
+    captcha_text = input("CAPTCHA: ").strip()
+
+    # Prepare login data
+    login_data = {
+        'username': username,
+        'password': password,
+        'captcha': captcha_text,
+        '_token': csrf_token
+    }
+
+    # Perform login
+    print("[*] Attempting login...")
+    login_response = session.post(LOGIN_URL, data=login_data)
+    login_soup = BeautifulSoup(login_response.text, 'html.parser')
+
+    # Check for errors
+    error_div = login_soup.find("div", class_="alert-danger")
+    if error_div:
+        print(f"[-] Login failed: {error_div.text.strip()}")
+        return False
+    else:
+        print("[+] Login successful!")
+        return True
+
+def is_product_page(url):
+    """Check if the URL is a main product page (excluding sub-pages)"""
+    parsed_url = urlparse(url)
+    path = parsed_url.path
+    
+    # Check if it's a product URL at all
+    if PRODUCT_IDENTIFIER not in path:
+        return False
+    
+    # Split the path into segments
+    segments = path.split('/')
+    
+    # Only consider it a product page if it has exactly the structure /product/[product-slug]
+    # This will filter out sub-pages like /product/[product-slug]/feedback
+    if len(segments) > 3:
+        return False
+    
+    # The URL should have exactly 3 segments (including an empty segment at the beginning from the leading slash)
+    # For example: ['', 'product', 'product-slug']
+    return len(segments) == 3 and segments[1] == 'product'
+
+def extract_product_data(product_soup, product_url):
+    """Extract all product data using comprehensive selectors"""
+    product_data = {"Product URL": product_url}
+    extraction_success = True
+    
+    try:
+        # Product Name
+        try:
+            product_name_path = product_soup.select_one("div.product-page.page-content.page-has-title div.main-content.inner div.content-holder div.product-box div.row > div.col-md-6:nth-of-type(2) div.product-page-summary h1")
+            
+            if product_name_path:
+                product_data["Product Name"] = product_name_path.text.strip()
+            else:
+                # Fallback approach
+                product_name_alt = product_soup.select_one("div.product-page-summary h1")
+                if product_name_alt:
+                    product_data["Product Name"] = product_name_alt.text.strip()
+                else:
+                    # If we can't get the product name, we consider this as a failed extraction
+                    extraction_success = False
+        except Exception as e:
+            print(f"[-] Error extracting product name: {str(e)}")
+            extraction_success = False
+        
+        # Product Description - MODIFIED: Save the full description without slicing
+        try:
+            description_path = product_soup.select_one("div.product-page.page-content.page-has-title div.main-content.inner div.content-holder div.tab-box div.tab-content div#home pre")
+            
+            if description_path:
+                product_data["Product Description"] = description_path.text.strip()
+            else:
+                # Fallback approach
+                description_alt = product_soup.select_one("div#home pre")
+                if description_alt:
+                    product_data["Product Description"] = description_alt.text.strip()
+        except Exception as e:
+            print(f"[-] Error extracting description: {str(e)}")
+        
+        # Category information
+        try:
+            # Navigate through the HTML structure to find the breadcrumb
+            breadcrumb = product_soup.select_one("body div.wrapper div.mainCntr main#contentCntr div.product-page.page-content.page-has-title div.page-title div.page-title-inner.holder-inner div.c-breadcrumb")
+            
+            if breadcrumb:
+                # Get all a tags in the breadcrumb
+                category_links = breadcrumb.find_all('a')
+                
+                # Check if we have enough a tags
+                if len(category_links) >= 4:
+                    product_data["Outer Category"] = category_links[2].text.strip()
+                    product_data["Inner Category"] = category_links[3].text.strip()
+            else:
+                # Alternative approach with a more flexible CSS selector
+                breadcrumb_alt = product_soup.select_one("div.c-breadcrumb")
+                if breadcrumb_alt:
+                    category_links = breadcrumb_alt.find_all('a')
+                    if len(category_links) >= 4:
+                        product_data["Outer Category"] = category_links[2].text.strip()
+                        product_data["Inner Category"] = category_links[3].text.strip()
+        except Exception as e:
+            print(f"[-] Error extracting categories: {str(e)}")
+        
+        # Product Rating
+        try:
+            # Navigate to the exact location based on the detailed path provided
+            rating_container = product_soup.select_one("div.wrapper div.mainCntr main#contentCntr div.product-page.page-content.page-has-title div.main-content.inner div.content-holder div.product-box div.row div.col-md-6:nth-of-type(2) div.product-page-summary form div.sold-by-box div.box-rating")
+            
+            # If the exact path doesn't work, try a more generic approach with the box-rating class
+            if not rating_container:
+                rating_container = product_soup.select_one("div.box-rating")
+            
+            if rating_container:
+                # Find all spans with the specific class mentioned
+                star_spans = rating_container.select("span.has-image-icon.image-icon-small")
+                
+                if star_spans:
+                    # Initialize rating
+                    rating = 0.0
+                    total_stars = len(star_spans)
+                    filled_stars = 0
+                    
+                    for span in star_spans:
+                        # Find image inside the span with class "image-icon darkmode-show"
+                        star_img = span.select_one("img.image-icon.darkmode-show")
+                        
+                        if star_img:
+                            src = star_img.get('src', '')
+                            alt = star_img.get('alt', '').lower()
+                            
+                            # Check if it's a filled star
+                            if ('full' in src.lower() or 'filled' in src.lower() or 
+                                'full' in alt or 'filled' in alt or
+                                'YAAAOpgABdvkl/FRgAAAeFJREFUeNrsm0GOwzAIRZn7' in src):
+                                rating += 1.0
+                                filled_stars += 1
+                            # Check if it's a half star
+                            elif ('half' in src.lower() or 'half' in alt or
+                                  'YAAAOpgABdvkl/FRgAAAc9JREFUeNrs2s1KxDAQB/Cs' in src):
+                                rating += 0.5
+                                filled_stars += 0.5
+                    
+                    product_data["Product Rating"] = str(rating)
+        except Exception as e:
+            print(f"[-] Error extracting product rating: {str(e)}")
+        
+        # Vendor Name
+        try:
+            # Use the specific path provided to locate the vendor name element
+            vendor_link = product_soup.select_one("div#wrapper div#mainCntr main#contentCntr div.product-page.page-content.page-has-title div.main-content.inner div.content-holder div.product-box div.row div.col-md-6:nth-of-type(2) div.product-page-summary form div.sold-by-box span.mr-2 a.link")
+            
+            # Fallback to a more generic selector if the specific path doesn't work
+            if not vendor_link:
+                vendor_link = product_soup.select_one("div.sold-by-box span.mr-2 a.link")
+            
+            if vendor_link:
+                product_data["Vendor Name"] = vendor_link.get_text(strip=True)
+        except Exception as e:
+            print(f"[-] Error extracting vendor name: {str(e)}")
+        
+        # Vendor Level
+        try:
+            # Use the specific path provided to locate the vendor level element
+            vendor_level_span = product_soup.select_one("div#wrapper div#mainCntr main#contentCntr div.product-page.page-content.page-has-title div.main-content.inner div.content-holder div.product-box div.row div.col-md-6:nth-of-type(2) div.product-page-summary form div.sold-by-box span.c-badge.c-badge-pill.badge-vendor-lv.mr-2")
+            
+            # Fallback to a more generic selector if the specific path doesn't work
+            if not vendor_level_span:
+                vendor_level_span = product_soup.select_one("div.sold-by-box span.c-badge.c-badge-pill.badge-vendor-lv.mr-2")
+            
+            if vendor_level_span:
+                product_data["Vendor Level"] = vendor_level_span.get_text(strip=True)
+        except Exception as e:
+            print(f"[-] Error extracting vendor level: {str(e)}")
+        
+        # Price per gram
+        try:
+            # Use the specific path provided to locate the price element
+            price_element = product_soup.select_one("div#wrapper div#mainCntr main#contentCntr div.product-page.page-content.page-has-title div.main-content.inner div.content-holder div.product-box div.row div.col-md-6:nth-of-type(2) div.product-page-summary form div.price-list-box div.d-flex.flex-wrap.justify-content-between.align-items-center div.content.flex-1.mr-sm-2.mb-2.mb-sm-0 div.row.mb-2 span.col-5 strong")
+            
+            # Fallback to a more generic selector if the specific path doesn't work
+            if not price_element:
+                price_element = product_soup.select_one("div.price-list-box div.content span.col-5 strong")
+            
+            if price_element:
+                price_text = price_element.get_text(strip=True)
+                price_match = re.search(r'([$€£¥]?\s*[\d,.]+)', price_text)
+                if price_match:
+                    product_data["Price Per Gram"] = price_match.group(1)
+        except Exception as e:
+            print(f"[-] Error extracting price per gram: {str(e)}")
+        
+        # Quantity in stock/Sold
+        try:
+            # Use the path provided to locate the quantity in stock element
+            stock_span = product_soup.select_one("div.price-list-box div.total div.d-flex.flex-wrap span.total-content.mr-5")
+            
+            # Use the CORRECTED path to locate the quantity sold element (with ml-5 class instead of mr-5)
+            sold_span = product_soup.select_one("div.price-list-box div.total div.d-flex.flex-wrap span.total-content.ml-5")
+            
+            # Process quantity in stock
+            if stock_span:
+                stock_text = stock_span.get_text(strip=True)
+                stock_match = re.search(r'(\d+)', stock_text)
+                if stock_match:
+                    product_data["Quantity in Stock"] = stock_match.group(1)
+            
+            # Process quantity sold
+            if sold_span:
+                sold_text = sold_span.get_text(strip=True)
+                sold_match = re.search(r'(\d+)', sold_text)
+                if sold_match:
+                    product_data["Quantity Sold"] = sold_match.group(1)
+        except Exception as e:
+            print(f"[-] Error extracting quantity information: {str(e)}")
+        
+        # Product Type, Ships From, Escrow, Ships To, and Delivery Type
+        try:
+            # Get the second div.col-md-6 that contains the product summary
+            product_summary = product_soup.select_one("div#wrapper div#mainCntr main#contentCntr div.product-page.page-content.page-has-title div.main-content.inner div.content-holder div.product-box div.row div.col-md-6:nth-of-type(2) div.product-page-summary")
+            
+            if product_summary:
+                # Find the product details section
+                product_details = product_summary.select_one("form div.product-details div.row")
+                
+                if product_details:
+                    # Get the two columns
+                    columns = product_details.select("div.col-sm-6")
+                    
+                    if len(columns) >= 2:
+                        # FIRST COLUMN - contains Product Type, Ships From, and Escrow
+                        first_col = columns[0]
+                        
+                        # Get list items in the first column
+                        list_items = first_col.select("ul li.mb-1")
+                        
+                        # Extract Product Type - in first li, second span with specific class
+                        if list_items and len(list_items) >= 1:
+                            product_type_spans = list_items[0].select("span")
+                            if len(product_type_spans) >= 2:
+                                product_type_span = product_type_spans[1]  # Second span
+                                if product_type_span.has_attr('class') and 'c-badge-orange' in product_type_span.get('class'):
+                                    product_data["Product Type"] = product_type_span.get_text(strip=True)
+                        
+                        # Extract Ships From - in second li, second span
+                        if list_items and len(list_items) >= 2:
+                            ships_from_spans = list_items[1].select("span")
+                            if len(ships_from_spans) >= 2:
+                                product_data["Ships From"] = ships_from_spans[1].get_text(strip=True)
+                        
+                        # Extract Escrow - in div.d-flex.flex-wrap, second span
+                        escrow_container = first_col.select_one("div.d-flex.flex-wrap")
+                        if escrow_container:
+                            escrow_spans = escrow_container.select("span")
+                            if len(escrow_spans) >= 2:
+                                product_data["Escrow"] = escrow_spans[1].get_text(strip=True)
+                        
+                        # SECOND COLUMN - contains Ships To and Delivery Type
+                        second_col = columns[1]
+                        
+                        # Get list items in the second column
+                        list_items = second_col.select("ul li.mb-1")
+                        
+                        # Extract Ships To - in second li, second span with em tag
+                        if list_items and len(list_items) >= 2:
+                            ships_to_spans = list_items[1].select("span")
+                            if len(ships_to_spans) >= 2:
+                                ships_to_span = ships_to_spans[1]
+                                ships_to_em = ships_to_span.select_one("em")
+                                if ships_to_em:
+                                    product_data["Ships To"] = ships_to_em.get_text(strip=True)
+                                else:
+                                    product_data["Ships To"] = ships_to_span.get_text(strip=True)
+                        
+                        # Extract Delivery Type - in third li, second span
+                        if list_items and len(list_items) >= 3:
+                            delivery_spans = list_items[2].select("span")
+                            if len(delivery_spans) >= 2:
+                                product_data["Delivery Type"] = delivery_spans[1].get_text(strip=True)
+        except Exception as e:
+            print(f"[-] Error extracting product details: {str(e)}")
+            
+        # Fallback approaches for product details
+        if "Product Type" not in product_data:
+            try:
+                product_type_spans = product_soup.select("span.c-badge.c-badge-pill.c-badge-orange")
+                if product_type_spans:
+                    product_data["Product Type"] = product_type_spans[0].get_text(strip=True)
+            except: pass
+            
+        if "Ships From" not in product_data:
+            try:
+                # Updated to use 'string' instead of 'text' to avoid deprecation warning
+                ships_from_elements = product_soup.find_all(string=lambda text: text and 'ships from' in text.lower())
+                if ships_from_elements:
+                    parent = ships_from_elements[0].parent
+                    next_span = parent.find_next("span")
+                    if next_span:
+                        product_data["Ships From"] = next_span.get_text(strip=True)
+            except: pass
+            
+        if "Escrow" not in product_data:
+            try:
+                # Updated to use 'string' instead of 'text' to avoid deprecation warning
+                escrow_elements = product_soup.find_all(string=lambda text: text and 'escrow' in text.lower())
+                if escrow_elements:
+                    next_span = escrow_elements[0].find_parent().find_next("span")
+                    if next_span:
+                        product_data["Escrow"] = next_span.get_text(strip=True)
+            except: pass
+            
+        if "Ships To" not in product_data:
+            try:
+                # Updated to use 'string' instead of 'text' to avoid deprecation warning
+                ships_to_elements = product_soup.find_all(string=lambda text: text and 'ships to' in text.lower())
+                if ships_to_elements:
+                    for element in ships_to_elements:
+                        parent = element.parent
+                        em = parent.find_next("em")
+                        if em:
+                            product_data["Ships To"] = em.get_text(strip=True)
+                            break
+            except: pass
+            
+        if "Delivery Type" not in product_data:
+            try:
+                # Updated to use 'string' instead of 'text' to avoid deprecation warning
+                delivery_elements = product_soup.find_all(string=lambda text: text and 'delivery' in text.lower())
+                if delivery_elements:
+                    for element in delivery_elements:
+                        parent = element.parent
+                        next_span = parent.find_next("span")
+                        if next_span:
+                            product_data["Delivery Type"] = next_span.get_text(strip=True)
+                            break
+            except: pass
+    
+    except Exception as e:
+        print(f"[-] Major error extracting product data: {str(e)}")
+        extraction_success = False
+    
+    # Check if we have a valid extraction - if Product Name is missing or "Unknown", consider it failed
+    if not extraction_success or product_data.get("Product Name", "") == "Unknown" or not product_data.get("Product Name", ""):
+        print(f"[-] Extraction failed or incomplete for {product_url}")
+        return None
+    
+    return product_data
+
+def save_to_csv(data, filename, is_new_file=False):
+    """Save the extracted data to a CSV file"""
+    try:
+        mode = 'w' if is_new_file else 'a'
+        with open(filename, mode, newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=CSV_COLUMNS)
+            
+            if is_new_file:
+                writer.writeheader()
+            
+            writer.writerow(data)
+        
+        return True
+    except Exception as e:
+        print(f"[-] Error saving to CSV: {str(e)}")
+        return False
+
+def crawl_website():
+    """Main function to crawl the website using BFS, find product pages, and extract data"""
+    # Initialize a session with Tor proxies
+    session = initialize_session()
+    
+    # Log in to the website
+    if not login(session):
+        print("[-] Cannot proceed without login")
+        return
+    
+    # IMPROVED: Better login verification that checks for actual content
+    try:
+        # Fetch the homepage to verify session is logged in
+        home_response = session.get(BASE_URL)
+        home_soup = BeautifulSoup(home_response.content, 'html.parser')
+        
+        # Instead of looking for specific elements, check for login-related content
+        # Option 1: Check for login link (shouldn't be present if logged in)
+        login_link = home_soup.find('a', href=lambda href: href and '/signin' in href)
+        
+        # Option 2: Look for welcome message or user-specific content
+        user_content = home_soup.find(string=lambda text: text and ('welcome' in text.lower() or 'dashboard' in text.lower() or 'logout' in text.lower()))
+        
+        # Option 3: Check for elements that only appear for logged-in users
+        dashboard_link = home_soup.find('a', href=lambda href: href and ('/dashboard' in href or '/account' in href))
+        
+        # If login link is present or no user-specific content is found, login verification failed
+        if login_link and not (user_content or dashboard_link):
+            print("[-] Login verification failed - session may not be authenticated")
+            # DEBUG: Print a sample of the page to check what's going on
+            print("[DEBUG] Page content sample:")
+            page_sample = home_soup.get_text()[:500]  # Get first 500 chars
+            print(page_sample)
+            
+            # Try checking for common error messages
+            error_messages = home_soup.find_all(class_=lambda c: c and ('error' in c or 'alert' in c))
+            if error_messages:
+                print("[DEBUG] Found error messages:")
+                for msg in error_messages:
+                    print(f"  - {msg.get_text(strip=True)}")
+            
+            # Despite verification failure, we'll continue anyway since login reported success
+            print("[*] Continuing anyway since login function reported success...")
+        else:
+            print("[+] Login verified successfully")
+    except Exception as e:
+        print(f"[-] Error verifying login: {str(e)}")
+        # Continue anyway since login reported success
+        print("[*] Continuing anyway since login function reported success...")
+    
+    # Rest of the crawl_website function stays the same...
+    # Create a new CSV file with headers
+    if os.path.exists(OUTPUT_FILE):
+        print(f"[*] Existing file {OUTPUT_FILE} found - will append to it")
+        is_new_file = False
+    else:
+        is_new_file = True
+    
+    # Initialize BFS tracking variables
+    visited_urls = set()
+    queue = deque([BASE_URL])  # Start with homepage
+    products_scraped = 0
+    product_urls_found = set()  # Track unique product URLs found
+    
+    print(f"[*] Starting crawler, will save data to {OUTPUT_FILE}")
+    
+    # Main crawling loop using BFS - continue until no more URLs to visit
+    while queue:
+        # Get next URL to visit
+        current_url = queue.popleft()
+        
+        # Skip if already visited
+        if current_url in visited_urls:
+            continue
+        
+        # Mark as visited
+        visited_urls.add(current_url)
+        
+        # Introduce random delay to avoid overwhelming the server
+        delay = random.uniform(DELAY_MIN, DELAY_MAX)
+        print(f"[*] Waiting {delay:.2f} seconds before next request...")
+        time.sleep(delay)
+        
+        print(f"[*] Visiting: {current_url}")
+        
+        try:
+            # Get the page using the authenticated session
+            response = session.get(current_url)
+            if response.status_code != 200:
+                print(f"[-] Failed to fetch {current_url}: Status code {response.status_code}")
+                continue
+            
+            # Parse HTML
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Check if this is a product page
+            if is_product_page(current_url):
+                print(f"[+] Processing product page: {current_url}")
+                product_urls_found.add(current_url)
+                
+                # Extract product data
+                product_data = extract_product_data(soup, current_url)
+                
+                # Only save to CSV if extraction was successful
+                if product_data:
+                    if save_to_csv(product_data, OUTPUT_FILE, is_new_file and products_scraped == 0):
+                        products_scraped += 1
+                        print(f"[+] Saved product #{products_scraped}: {product_data.get('Product Name', 'Unknown')}")
+                        is_new_file = False
+                    else:
+                        print(f"[-] Failed to save product data for {current_url}")
+                else:
+                    print(f"[-] Skipping product due to extraction failure: {current_url}")
+            
+            # Extract all links from the page (regardless of page type)
+            links = []
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                
+                # Make relative URLs absolute
+                if not href.startswith(('http://', 'https://')):
+                    href = urljoin(BASE_URL, href)
+                
+                # Only include links from the same domain
+                if urlparse(href).netloc == urlparse(BASE_URL).netloc:
+                    if href not in visited_urls and href not in queue:
+                        # Prioritize product links
+                        if is_product_page(href):
+                            queue.appendleft(href)  # Add product links to front of queue
+                            product_urls_found.add(href)
+                        else:
+                            queue.append(href)  # Add other links to end of queue
+            
+            # Periodic status update
+            if len(visited_urls) % 10 == 0:
+                print(f"[*] Status: {len(visited_urls)} URLs visited, {len(queue)} in queue, {products_scraped} products saved, {len(product_urls_found)} product URLs found")
+                
+        except Exception as e:
+            print(f"[-] Error processing {current_url}: {str(e)}")
+    
+    print(f"\n[+] Crawling complete! Visited {len(visited_urls)} URLs")
+    print(f"[+] Found {len(product_urls_found)} product URLs")
+    print(f"[+] Successfully scraped and saved {products_scraped} products")
+    print(f"[+] Data saved to {OUTPUT_FILE}")
+    
+if __name__ == "__main__":
+    crawl_website()
