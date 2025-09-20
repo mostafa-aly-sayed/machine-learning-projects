@@ -1,0 +1,404 @@
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import time
+import csv
+import os
+from typing import Dict, List, Optional
+
+class MarketScraper:
+    def __init__(self, base_onion_url: str = "http://whloxt73yvhgx42ij4x6zvcl6ivoxefmch4xl3qu2pl3isjebnywubad.onion"):
+        """
+        Initialize the MarketScraper with base configuration
+        
+        Args:
+            base_onion_url: The base .onion URL for the marketplace
+        """
+        self.base_url = base_onion_url
+        self.session = self._setup_tor_session()
+        
+        # Category configurations
+        self.categories = {
+            'drugs': {
+                'url_path': '/category/drugs/',
+                'total_pages': 1191,
+                'batch_size': 50  # Process pages in batches
+            },
+            'digital': {
+                'url_path': '/category/digital/',
+                'total_pages': 500,
+                'batch_size': 50
+            },
+            'tutorials': {
+                'url_path': '/category/tutorials/',
+                'total_pages': 186,
+                'batch_size': 50
+            }
+        }
+        
+        # Headers for detailed product information
+        self.detail_headers = [
+            'Name', 'URL', 'Comments', 'Price', 'Seller', 'Seller Location', 
+            'Ships to (seller)', 'Ships to (product)', 'Category', 
+            'Quantity in stock', 'Dead drop', 'Availability'
+        ]
+    
+    def _setup_tor_session(self) -> requests.Session:
+        """Setup Tor session with proper proxy configuration"""
+        session = requests.Session()
+        session.proxies = {
+            'http': 'socks5h://127.0.0.1:9150',
+            'https': 'socks5h://127.0.0.1:9150'
+        }
+        return session
+    
+    def scrape_undetailed_data(self, category: str, start_page: int = 1, end_page: Optional[int] = None) -> None:
+        """
+        Stage 1: Scrape undetailed data from category pages
+        
+        Args:
+            category: Category name ('drugs', 'digital', 'tutorials')
+            start_page: Starting page number
+            end_page: Ending page number (if None, uses category's total_pages)
+        """
+        if category not in self.categories:
+            raise ValueError(f"Invalid category: {category}")
+        
+        category_config = self.categories[category]
+        end_page = end_page or category_config['total_pages']
+        base_category_url = f"{self.base_url}{category_config['url_path']}"
+        output_file = f"Undetailed_{category.capitalize()}_Data.csv"
+        
+        print(f"[+] Starting undetailed scraping for {category} category...")
+        print(f"[+] Pages: {start_page} to {end_page}")
+        
+        for page_number in range(start_page, end_page + 1):
+            try:
+                page_data = self._scrape_category_page(base_category_url, page_number)
+                
+                if page_data:
+                    # Save data incrementally
+                    df = pd.DataFrame(page_data)
+                    file_exists = os.path.exists(output_file)
+                    df.to_csv(output_file, mode='a', header=not file_exists, index=False)
+                    print(f"[+] Data from page {page_number} saved to {output_file}")
+                
+                # Rate limiting
+                time.sleep(1)
+                
+            except Exception as e:
+                print(f"[-] Error scraping page {page_number}: {e}")
+                continue
+        
+        print(f"[+] Completed undetailed scraping for {category}")
+    
+    def _scrape_category_page(self, base_url: str, page_number: int) -> List[Dict]:
+        """Scrape a single category page for undetailed product information"""
+        url = f"{base_url}{page_number}/"
+        
+        try:
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            products_data = []
+            
+            # Find all product containers
+            products = soup.find_all('div', class_='info')
+            
+            for product in products:
+                product_data = self._extract_undetailed_product_info(product)
+                products_data.append(product_data)
+            
+            return products_data
+            
+        except Exception as e:
+            print(f"[-] Failed to fetch page {page_number}: {e}")
+            return []
+    
+    def _extract_undetailed_product_info(self, product_element) -> Dict:
+        """Extract undetailed product information from a product element"""
+        product_data = {}
+        
+        # Product name
+        try:
+            product_data['Product Name'] = product_element.find('div', class_='title')['title'].strip()
+        except (AttributeError, TypeError):
+            product_data['Product Name'] = None
+        
+        # Description
+        try:
+            product_data['Description'] = product_element.find('div', class_='description').text.strip()
+        except AttributeError:
+            product_data['Description'] = None
+        
+        # Rating
+        try:
+            rating_element = product_element.find('div', class_='stars').find('div', class_='stars2')
+            rating = rating_element['style'].strip()
+            product_data['Rating (%)'] = rating.split(':')[-1].replace('%', '').replace(';', '').strip()
+        except (AttributeError, TypeError):
+            product_data['Rating (%)'] = None
+        
+        # Stats (Views and Purchased)
+        try:
+            stats = product_element.find('div', class_='stats')
+            if stats:
+                table = stats.find('table', {'border': '0'})
+                if table:
+                    last_tr = table.find_all('tr')[-1]
+                    tds = last_tr.find_all('td')
+                    if len(tds) >= 2:
+                        product_data['Views'] = tds[0].text.strip()
+                        product_data['Purchased'] = tds[1].text.strip()
+                    else:
+                        product_data['Views'] = None
+                        product_data['Purchased'] = None
+                else:
+                    product_data['Views'] = None
+                    product_data['Purchased'] = None
+            else:
+                product_data['Views'] = None
+                product_data['Purchased'] = None
+        except (AttributeError, IndexError):
+            product_data['Views'] = None
+            product_data['Purchased'] = None
+        
+        # Price
+        try:
+            product_data['Price'] = product_element.find('div', class_='buttons').find('div', class_='price').text.strip()
+        except AttributeError:
+            product_data['Price'] = None
+        
+        return product_data
+    
+    def scrape_product_urls(self, category: str, start_page: int = 1, end_page: Optional[int] = None) -> None:
+        """
+        Stage 2: Extract product URLs from category pages
+        
+        Args:
+            category: Category name ('drugs', 'digital', 'tutorials')
+            start_page: Starting page number
+            end_page: Ending page number (if None, uses category's total_pages)
+        """
+        if category not in self.categories:
+            raise ValueError(f"Invalid category: {category}")
+        
+        category_config = self.categories[category]
+        end_page = end_page or category_config['total_pages']
+        base_category_url = f"{self.base_url}{category_config['url_path']}"
+        output_file = f"{category.capitalize()}_URLs.csv"
+        
+        print(f"[+] Starting URL extraction for {category} category...")
+        print(f"[+] Pages: {start_page} to {end_page}")
+        
+        with open(output_file, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(["Product URL"])
+            
+            for page in range(start_page, end_page + 1):
+                try:
+                    category_url = f"{base_category_url}{page}/"
+                    print(f"[+] Fetching category page: {category_url}")
+                    
+                    response = self.session.get(category_url, timeout=30)
+                    response.raise_for_status()
+                    
+                    soup = BeautifulSoup(response.text, "html.parser")
+                    product_links = soup.find_all("a", href=True)
+                    
+                    # Extract unique product URLs
+                    product_urls = set()
+                    for link in product_links:
+                        href = link["href"]
+                        if href.startswith("/product/"):
+                            full_product_url = self.base_url + href
+                            if full_product_url not in product_urls:
+                                product_urls.add(full_product_url)
+                                writer.writerow([full_product_url])
+                    
+                    print(f"    [-] Found {len(product_urls)} unique products on page {page}")
+                    file.flush()
+                    time.sleep(2)  # Rate limiting
+                    
+                except Exception as e:
+                    print(f"[-] Failed to fetch page {page}: {e}")
+                    continue
+        
+        print(f"[+] Finished extracting product URLs for {category}. Saved to '{output_file}'")
+    
+    def scrape_detailed_data(self, category: str, urls_file: Optional[str] = None) -> None:
+        """
+        Stage 3: Scrape detailed product information from individual product pages
+        
+        Args:
+            category: Category name ('drugs', 'digital', 'tutorials')
+            urls_file: CSV file containing product URLs (if None, uses default naming)
+        """
+        if urls_file is None:
+            urls_file = f"{category.capitalize()}_URLs.csv"
+        
+        if not os.path.exists(urls_file):
+            raise FileNotFoundError(f"URLs file not found: {urls_file}")
+        
+        # Read URLs from CSV
+        urls_df = pd.read_csv(urls_file)
+        urls = urls_df['Product URL'].tolist()
+        
+        output_file = f"Detailed_{category.capitalize()}_Data.csv"
+        file_exists = os.path.exists(output_file)
+        
+        print(f"[+] Starting detailed scraping for {category} category...")
+        print(f"[+] Processing {len(urls)} product URLs...")
+        
+        for i, url in enumerate(urls, 1):
+            try:
+                print(f"[+] Processing URL {i}/{len(urls)}: {url}")
+                
+                response = self.session.get(url, timeout=30)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.text, "html.parser")
+                product_data = self._extract_detailed_product_info(soup, url)
+                
+                # Save data
+                df = pd.DataFrame([product_data], columns=self.detail_headers)
+                df.to_csv(output_file, mode='a', header=not file_exists, index=False)
+                
+                if not file_exists:
+                    file_exists = True
+                
+                print(f"    [-] Data saved for: {product_data.get('Name', 'Unknown')}")
+                
+                # Rate limiting
+                time.sleep(1)
+                
+            except Exception as e:
+                print(f"[-] Error scraping {url}: {e}")
+                continue
+        
+        print(f"[+] Completed detailed scraping for {category}. Data saved to '{output_file}'")
+    
+    def _extract_detailed_product_info(self, soup: BeautifulSoup, url: str) -> Dict:
+        """Extract detailed product information from a product page"""
+        product_data = {}
+        
+        # Extract product name
+        try:
+            product_data['Name'] = soup.find('div', class_='main').find('div', class_='heading').get_text(strip=True)
+        except AttributeError:
+            product_data['Name'] = "Unknown"
+        
+        # Add URL
+        product_data['URL'] = url
+        
+        # Extract comments
+        try:
+            comments_section = soup.find('div', class_='main').find('div', class_='comments')
+            if comments_section:
+                comments = comments_section.find_all('div', class_='box')
+                product_data['Comments'] = " | ".join([comment.get_text(strip=True) for comment in comments])
+            else:
+                product_data['Comments'] = "No comments"
+        except AttributeError:
+            product_data['Comments'] = "No comments"
+        
+        # Extract table information
+        try:
+            info_table = soup.find('table', {'border': '0'})
+            if info_table:
+                table_data = []
+                for row in info_table.find_all('tr'):
+                    columns = row.find_all('td')
+                    if len(columns) >= 3:
+                        value = columns[2].get_text(strip=True)
+                        table_data.append(value)
+                
+                # Map table data to remaining headers
+                remaining_headers = self.detail_headers[3:]  # Skip Name, URL, Comments
+                for i, header in enumerate(remaining_headers):
+                    if i < len(table_data):
+                        product_data[header] = table_data[i]
+                    else:
+                        product_data[header] = "N/A"
+            else:
+                # Fill with N/A if no table found
+                for header in self.detail_headers[3:]:
+                    product_data[header] = "N/A"
+        except Exception as e:
+            print(f"    [-] Error extracting table data: {e}")
+            for header in self.detail_headers[3:]:
+                product_data[header] = "N/A"
+        
+        return product_data
+    
+    def run_full_pipeline(self, category: str, start_page: int = 1, end_page: Optional[int] = None) -> None:
+        """
+        Run the complete scraping pipeline for a category
+        
+        Args:
+            category: Category name ('drugs', 'digital', 'tutorials')
+            start_page: Starting page number
+            end_page: Ending page number (if None, uses category's total_pages)
+        """
+        print(f"[+] Starting full pipeline for {category} category...")
+        
+        # Stage 1: Scrape undetailed data
+        print(f"\n{'='*50}")
+        print("STAGE 1: SCRAPING UNDETAILED DATA")
+        print(f"{'='*50}")
+        self.scrape_undetailed_data(category, start_page, end_page)
+        
+        # Stage 2: Extract product URLs
+        print(f"\n{'='*50}")
+        print("STAGE 2: EXTRACTING PRODUCT URLS")
+        print(f"{'='*50}")
+        self.scrape_product_urls(category, start_page, end_page)
+        
+        # Stage 3: Scrape detailed data
+        print(f"\n{'='*50}")
+        print("STAGE 3: SCRAPING DETAILED DATA")
+        print(f"{'='*50}")
+        self.scrape_detailed_data(category)
+        
+        print(f"\n[+] Full pipeline completed for {category} category!")
+    
+    def run_all_categories(self) -> None:
+        """Run the complete scraping pipeline for all categories"""
+        print("[+] Starting full pipeline for ALL categories...")
+        
+        for category in self.categories.keys():
+            try:
+                print(f"\n{'='*60}")
+                print(f"PROCESSING CATEGORY: {category.upper()}")
+                print(f"{'='*60}")
+                self.run_full_pipeline(category)
+            except Exception as e:
+                print(f"[-] Error processing category {category}: {e}")
+                continue
+        
+        print("\n[+] All categories processing completed!")
+
+# Main Run
+if __name__ == "__main__":
+    # Initialize scraper
+    scraper = MarketScraper()
+    
+    # Option 1: Run individual stages for a specific category
+    category = "tutorials"  # Change to 'drugs', 'digital', or 'tutorials'
+    
+    # Run individual stages
+    # scraper.scrape_undetailed_data(category, start_page=1, end_page=10)
+    # scraper.scrape_product_urls(category, start_page=1, end_page=10)
+    # scraper.scrape_detailed_data(category)
+    
+    # Option 2: Run full pipeline for one category
+    # scraper.run_full_pipeline(category, start_page=1, end_page=10)
+    
+    # Option 3: Run full pipeline for all categories
+    # scraper.run_all_categories()
+    
+    # Example: Run with custom page ranges
+    # scraper.run_full_pipeline("digital", start_page=1, end_page=50)
+    
+    print("Scraper initialized. Uncomment the desired execution method above.")
